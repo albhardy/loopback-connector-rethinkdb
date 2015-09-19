@@ -78,7 +78,7 @@ RethinkDB.prototype.connect = function(cb) {
             cb && cb(null, self.db);
         });
     } else {
-        r.connect({host: s.host, port: s.port, authKey: s.password}, function (error, client) {
+        r.connect({host: s.host, port: s.port}, function (error, client) {
             self.db = client
             cb && cb(error, client)
         });
@@ -141,7 +141,7 @@ RethinkDB.prototype.autoupdate = function(models, done) {
                 done(e);
             });
         });
-
+        
     });
 
     function createIndices(cb, model, client) {
@@ -242,6 +242,7 @@ RethinkDB.prototype.isActual = function(cb) {
 RethinkDB.prototype.create = function (model, data, callback) {
     var idValue = this.getIdValue(model, data)
     var idName = this.idName(model)
+    //console.log("Create: idValue:"+idValue+" idName:"+idName)
 
     if (idValue === null || idValue === undefined) {
         delete data[idName];
@@ -256,6 +257,8 @@ RethinkDB.prototype.create = function (model, data, callback) {
 RethinkDB.prototype.updateOrCreate = function (model, data, callback) {
     var idValue = this.getIdValue(model, data)
     var idName = this.idName(model)
+    //console.log("Update or Create: idValue:"+idValue+" idName:"+idName)
+
 
     if (idValue === null || idValue === undefined) {
         delete data[idName];
@@ -264,7 +267,7 @@ RethinkDB.prototype.updateOrCreate = function (model, data, callback) {
         idName !== 'id' && delete data[idName];
     }
 
-    this.save(model, data, callback, false, true);
+    this.save(model, data, callback, true, true);
 }
 
 RethinkDB.prototype.save = function (model, data, callback, strict, returnObject) {
@@ -297,11 +300,13 @@ RethinkDB.prototype.save = function (model, data, callback, strict, returnObject
         else {
             var info = {}
             var object = null
+            console.log("[Connector] RDB Insert")
+            console.log(m)
 
             if (m.inserted > 0) {
                 // create
                 info.isNewInstance = true
-                idValue = m.changes[0].new_val.id
+                idValue = m.generated_keys[0]
             }
             if (m.changes && m.changes.length > 0) {
                 // update
@@ -310,9 +315,15 @@ RethinkDB.prototype.save = function (model, data, callback, strict, returnObject
                 idName !== 'id' && delete object._id
             }
 
+            
+            //console.log("Object")
+            //console.log(object)
+            //console.log("idValue")
+            //console.log(idValue)
+
             if (returnObject && m.changes && m.changes.length > 0) {
                 callback && callback(null, object, info)
-            } else {
+            } else {                
                 callback && callback(null, idValue, info);
             }
         }
@@ -322,6 +333,7 @@ RethinkDB.prototype.save = function (model, data, callback, strict, returnObject
 RethinkDB.prototype.exists = function (model, id, callback) {
     var _this = this;
     var client = this.db;
+    //console.log("Exist id "+id)
 
     if (!client) {
         _this.dataSource.once('connected', function () {
@@ -339,6 +351,7 @@ RethinkDB.prototype.find = function find(model, id, options, callback) {
     var _this = this,
         _keys;
     var client = this.db;
+    //console.log("find ID:"+id)
 
     if (!client) {
         _this.dataSource.once('connected', function () {
@@ -347,29 +360,28 @@ RethinkDB.prototype.find = function find(model, id, options, callback) {
         return
     }
 
-    var idName = this.idName(model)
+    var done = function (client) {
 
-    var promise = r.db(_this.database).table(model)
+        return function finished(err, data) {
 
-    if (idName == "id")
-        promise = promise.get(id)
-    else
-        promise = promise.filter({ idName: id })
+            // Acquire the keys for this model
+            _keys = _this._models[model].properties;
 
-    var rQuery = promise.toString()
+            if (data) {
 
-    promise.run(client, function(error, data) {
-        // Acquire the keys for this model
-        _keys = _this._models[model].properties;
+                // Pass to expansion helper
+                _expandResult(data, _keys);
+            }
 
-        if (data) {
-            // Pass to expansion helper
-            _expandResult(data, _keys);
-        }
+            // Done
+            callback(err, data);
+        };
+    };
 
-        // Done
-        callback && callback(error, data, rQuery);
-    });
+    r.db(_this.database)
+        .table(model)
+        .get(id)
+        .run(client, done(client));
 };
 
 RethinkDB.prototype.destroy = function destroy(model, id, callback) {
@@ -406,6 +418,35 @@ RethinkDB.prototype.all = function all(model, filter, options, callback) {
     var promise = r.db(_this.database).table(model);
 
     var idName = this.idName(model)
+    //console.log("[Connector] RethinkDB.prototype.all idName:"+idName)
+
+    if (filter.where) {
+         //console.log("filter.where")
+         //console.log(filter.where)
+            
+        if (filter.where[idName]) {
+            var id = filter.where[idName];
+            //console.log("filter.where[idName] :"+id)
+           
+            var where=filter.where
+            delete filter.where[idName];
+           // filter.where.cacheId = id;
+           /* filter.where={}
+            filter.where[idName]=id;*/
+            //promise=promise.get(id)
+            //filter.where.id = id;
+            //console.log("promise idName:"+idName)
+            //console.log(promise)
+            var f={}
+            f[idName]=id;
+            promise = buildWhere(_this, model, f, promise)
+            
+        }else{
+            promise = buildWhere(_this, model, filter.where, promise)
+        }
+        if (promise === null)
+            return callback && callback(null, [])
+    }
 
     if (filter.order) {
         var keys = filter.order;
@@ -423,18 +464,7 @@ RethinkDB.prototype.all = function all(model, filter, options, callback) {
         });
     } else {
         // default sort by id
-        promise = promise.orderBy({ "index": r.asc("id") });
-    }
-
-    if (filter.where) {
-        if (filter.where[idName]) {
-            var id = filter.where[idName];
-            delete filter.where[idName];
-            filter.where.id = id;
-        }
-        promise = buildWhere(_this, model, filter.where, promise)
-        if (promise === null)
-            return callback && callback(null, [])
+        promise = promise.orderBy(r.asc("id"));
     }
 
     if (filter.skip) {
@@ -442,14 +472,11 @@ RethinkDB.prototype.all = function all(model, filter, options, callback) {
     } else if (filter.offset) {
         promise = promise.skip(filter.offset);
     }
-
     if (filter.limit) {
         promise = promise.limit(filter.limit);
     }
 
-    var rQuery = promise.toString()
-
-    //console.log(rQuery)
+    //console.log(promise.toString())
 
     promise.run(client, function(error, cursor) {
 
@@ -472,7 +499,7 @@ RethinkDB.prototype.all = function all(model, filter, options, callback) {
             if (filter && filter.include && filter.include.length > 0) {
                 _model.include(data, filter.include, options, callback);
             } else {
-                callback && callback(null, data, rQuery);
+                callback && callback(null, data);
             }
         });
     });
@@ -602,6 +629,8 @@ function _expandResult(result, keys) {
 }
 
 function _hasIndex(_this, model, key) {
+    //console.log("_hasIndex key")
+    //console.log(key)
 
     // Primary key always hasIndex
     if (key === 'id') return true;
@@ -733,7 +762,7 @@ function buildFilter(where) {
                 // k is field equality
                 filter.push(r.row(k).eq(condition))
             }
-        }
+        }    
 
     })
 
@@ -754,6 +783,8 @@ function buildWhere(self, model, where, promise) {
     }
 
     var query = buildFilter(where)
+    //console.log("buildWhere ")
+   // console.log(query)
 
     if (query === undefined)
         return promise
